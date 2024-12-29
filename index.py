@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 import faiss
-import torch
 
 # Page configuration
 st.set_page_config(page_title="NBA Stats Explorer", layout="wide")
@@ -160,7 +159,6 @@ def main():
             st.warning("Please select teams and positions to enable AI features.")
 
 def create_basic_visualizations(df_selected_team):
-    # Your existing visualization code...
     if not df_selected_team.empty:
         # Scoring Efficiency
         st.header('🎯 Scoring Efficiency Analysis')
