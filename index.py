@@ -9,9 +9,6 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.ensemble import RandomForestRegressor
 import plotly.express as px
 import plotly.graph_objects as go
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
-import faiss
 
 # Page configuration
 st.set_page_config(page_title="NBA Stats Explorer", layout="wide")
@@ -35,15 +32,19 @@ st.markdown("""
 # Load Data
 @st.cache_data
 def load_data(year):
-    url = "https://www.basketball-reference.com/leagues/NBA_" + str(year) + "_per_game.html"
-    html = pd.read_html(url, header=0)
-    df = html[0]
-    raw = df.drop(df[df.Age == 'Age'].index)
-    raw = raw.fillna(0)
-    playerstats = raw.drop(['Rk'], axis=1)
-    playerstats = playerstats[playerstats['Team'] != 0]
-    playerstats['Awards'] = playerstats['Awards'].astype(str)
-    return playerstats
+    try:
+        url = "https://www.basketball-reference.com/leagues/NBA_" + str(year) + "_per_game.html"
+        html = pd.read_html(url, header=0)
+        df = html[0]
+        raw = df.drop(df[df.Age == 'Age'].index)
+        raw = raw.fillna(0)
+        playerstats = raw.drop(['Rk'], axis=1)
+        playerstats = playerstats[playerstats['Team'] != 0]
+        playerstats['Awards'] = playerstats['Awards'].astype(str)
+        return playerstats
+    except Exception as e:
+        st.error(f"Error loading data for year {year}: {e}")
+        return pd.DataFrame()
 
 # AI/ML Features
 class NBAInsightsAI:
@@ -87,37 +88,6 @@ class NBAInsightsAI:
             predictions[stat] = pred[0]
             
         return predictions
-
-@st.cache_resource
-def load_nlp_models():
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    qa_pipeline = pipeline('question-answering', model='distilbert-base-cased-distilled-squad')
-    return model, qa_pipeline
-
-class NBAQueryEngine:
-    def __init__(self, df):
-        self.df = df
-        self.model, self.qa_pipeline = load_nlp_models()
-        self.initialize_search_index()
-
-    def initialize_search_index(self):
-        self.text_data = []
-        for _, row in self.df.iterrows():
-            text = f"{row['Player']} is a {row['Pos']} who averaged {row['PTS']} points, {row['AST']} assists, and {row['TRB']} rebounds"
-            self.text_data.append(text)
-            
-        embeddings = self.model.encode(self.text_data)
-        self.dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(self.dimension)
-        self.index.add(embeddings.astype('float32'))
-
-    def natural_language_query(self, query):
-        query_embedding = self.model.encode([query])
-        D, I = self.index.search(query_embedding.astype('float32'), k=5)
-        relevant_contexts = [self.text_data[i] for i in I[0]]
-        context = " ".join(relevant_contexts)
-        result = self.qa_pipeline(question=query, context=context)
-        return result['answer'], relevant_contexts
 
 # Main App
 def main():
@@ -273,76 +243,82 @@ def filedownload(df):
 
 def add_ai_features_ui(df):
     st.header("🤖 AI-Powered Insights")
-    
-    ai_tab1, ai_tab2, ai_tab3 = st.tabs(["Player Similarity", "Performance Prediction", "Natural Language Queries"])
-    
-    nba_ai = NBAInsightsAI(df)
-    query_engine = NBAQueryEngine(df)
-    
+
+    ai_tab1, ai_tab2 = st.tabs(["Player Similarity", "Performance Prediction"])
+
+    # Initialize AI models
+    try:
+        nba_ai = NBAInsightsAI(df)
+        
+    except Exception as e:
+        st.error("Error initializing AI models. Please check the data or try again later.")
+        return
+
     with ai_tab1:
-        st.subheader("Find Similar Players")
-        selected_player = st.selectbox("Select a player:", df['Player'].unique())
-        if selected_player:
-            similar_players = nba_ai.find_similar_players(selected_player)
-            fig = px.bar(similar_players, 
-                        x='Player', 
-                        y='Similarity Score',
-                        color='Position',
-                        title=f"Players Similar to {selected_player}")
-            st.plotly_chart(fig)
-            st.dataframe(similar_players)
+        try:
+            st.subheader("Find Similar Players")
+            selected_player = st.selectbox("Select a player:", df['Player'].unique())
+            if selected_player:
+                similar_players = nba_ai.find_similar_players(selected_player)
+                if similar_players.empty:
+                    st.warning(f"No similar players found for {selected_player}.")
+                else:
+                    fig = px.bar(similar_players,
+                                 x='Player',
+                                 y='Similarity Score',
+                                 color='Position',
+                                 title=f"Players Similar to {selected_player}")
+                    st.plotly_chart(fig)
+                    st.dataframe(similar_players)
+        except Exception as e:
+            st.error("No similar players found.")
 
     with ai_tab2:
-        st.subheader("Performance Prediction")
-        pred_player = st.selectbox("Select player for prediction:", df['Player'].unique(), key='pred_player')
-        seasons = st.slider("Seasons ahead:", 1, 3, 1)
-        
-        if pred_player:
-            player_data = df[df['Player'] == pred_player]
-            predictions = nba_ai.predict_future_performance(player_data, seasons)
-            
-            categories = ['Points', 'Assists', 'Rebounds']
-            current_stats = [player_data['PTS'].iloc[0], 
-                           player_data['AST'].iloc[0], 
-                           player_data['TRB'].iloc[0]]
-            predicted_stats = [predictions['PTS'], 
-                             predictions['AST'], 
-                             predictions['TRB']]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(
-                r=current_stats,
-                theta=categories,
-                fill='toself',
-                name='Current Stats'
-            ))
-            fig.add_trace(go.Scatterpolar(
-                r=predicted_stats,
-                theta=categories,
-                fill='toself',
-                name=f'Predicted Stats ({seasons} seasons ahead)'
-            ))
-            
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, max(max(current_stats), max(predicted_stats))])),
-                showlegend=True,
-                title=f"Performance Prediction for {pred_player}"
-            )
-            
-            st.plotly_chart(fig)
+        try:
+            st.subheader("Performance Prediction")
+            pred_player = st.selectbox("Select player for prediction:", df['Player'].unique(), key='pred_player')
+            seasons = st.slider("Seasons ahead:", 1, 3, 1)
 
-    with ai_tab3:
-        st.subheader("Ask Questions About Players")
-        query = st.text_input("Ask a question about NBA players:", 
-                             placeholder="e.g., 'Who are the best scorers?', 'Which players have similar stats to LeBron James?'")
-        
-        if query:
-            answer, contexts = query_engine.natural_language_query(query)
-            st.write("Answer:", answer)
-            
-            with st.expander("View relevant player information"):
-                for context in contexts:
-                    st.write(context)
+            if pred_player:
+                player_data = df[df['Player'] == pred_player]
+                if player_data.empty:
+                    st.warning(f"No data found for {pred_player}.")
+                else:
+                    predictions = nba_ai.predict_future_performance(player_data, seasons)
+                    if predictions:
+                        categories = ['Points', 'Assists', 'Rebounds']
+                        current_stats = [
+                            player_data['PTS'].iloc[0],
+                            player_data['AST'].iloc[0],
+                            player_data['TRB'].iloc[0]
+                        ]
+                        predicted_stats = [predictions['PTS'], predictions['AST'], predictions['TRB']]
+
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatterpolar(
+                            r=current_stats,
+                            theta=categories,
+                            fill='toself',
+                            name='Current Stats'
+                        ))
+                        fig.add_trace(go.Scatterpolar(
+                            r=predicted_stats,
+                            theta=categories,
+                            fill='toself',
+                            name=f'Predicted Stats ({seasons} seasons ahead)'
+                        ))
+
+                        fig.update_layout(
+                            polar=dict(radialaxis=dict(visible=True, range=[0, max(max(current_stats), max(predicted_stats))])),
+                            showlegend=True,
+                            title=f"Performance Prediction for {pred_player}"
+                        )
+
+                        st.plotly_chart(fig)
+                    else:
+                        st.warning("Unable to generate predictions for the selected player.")
+        except Exception as e:
+            st.error("Error predicting player performance. Please try again.")
 
 if __name__ == "__main__":
     main()
