@@ -54,6 +54,7 @@ class NBAInsightsAI:
         self.feature_cols = ['Age', 'G', 'GS', 'MP', 'FG', 'FGA', 'FG%', '3P',
                            '3PA', '3P%', 'FT%', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PTS']
         
+        self.scaler.fit(df[self.feature_cols])
     def prepare_features(self, data):
         return self.scaler.fit_transform(data[self.feature_cols])
 
@@ -74,20 +75,31 @@ class NBAInsightsAI:
             'Position': similar_players['Pos']
         })
 
-    def predict_future_performance(self, player_data, seasons_ahead=1):
-        X = self.prepare_features(self.df)
-        
+    def predict_future_performance(self, player_data):
+        X = self.scaler.transform(self.df[self.feature_cols])
         predictions = {}
+
+        # Get current age
+        current_age = player_data['Age'].iloc[0]
+
+        # Scale the selected player's features
+        player_features = self.scaler.transform(player_data[self.feature_cols])
+
         for stat in ['PTS', 'AST', 'TRB']:
             y = self.df[stat]
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X, y)
+
+            # Update age for prediction
+            player_features_copy = player_features.copy()
+            player_features_copy[:, self.feature_cols.index('Age')] = current_age + 1  # Increment age
+
             
-            player_features = self.prepare_features(player_data)
-            pred = model.predict(player_features)
-            predictions[stat] = pred[0]
-            
+            pred = model.predict(player_features_copy)
+            predictions[stat] = float(pred[0])
+
         return predictions
+
 
 # Main App
 def main():
@@ -277,20 +289,19 @@ def add_ai_features_ui(df):
         try:
             st.subheader("Performance Prediction")
             pred_player = st.selectbox("Select player for prediction:", df['Player'].unique(), key='pred_player')
-            seasons = st.slider("Seasons ahead:", 1, 3, 1)
 
             if pred_player:
                 player_data = df[df['Player'] == pred_player]
                 if player_data.empty:
                     st.warning(f"No data found for {pred_player}.")
                 else:
-                    predictions = nba_ai.predict_future_performance(player_data, seasons)
+                    predictions = nba_ai.predict_future_performance(player_data)
                     if predictions:
                         categories = ['Points', 'Assists', 'Rebounds']
                         current_stats = [
-                            player_data['PTS'].iloc[0],
-                            player_data['AST'].iloc[0],
-                            player_data['TRB'].iloc[0]
+                            float(player_data['PTS'].iloc[0]),
+                            float(player_data['AST'].iloc[0]),
+                            float(player_data['TRB'].iloc[0])
                         ]
                         predicted_stats = [predictions['PTS'], predictions['AST'], predictions['TRB']]
 
@@ -305,16 +316,29 @@ def add_ai_features_ui(df):
                             r=predicted_stats,
                             theta=categories,
                             fill='toself',
-                            name=f'Predicted Stats ({seasons} seasons ahead)'
+                            name='Predicted Stats (1 season ahead)'
                         ))
 
+                        # Ensure all values are regular Python floats
+                        max_val = max(max(current_stats), max(predicted_stats))
+
                         fig.update_layout(
-                            polar=dict(radialaxis=dict(visible=True, range=[0, max(max(current_stats), max(predicted_stats))])),
+                            polar=dict(radialaxis=dict(visible=True, range=[0, float(max_val)])),
                             showlegend=True,
                             title=f"Performance Prediction for {pred_player}"
                         )
 
                         st.plotly_chart(fig)
+
+                        # Table showing stats
+                        comparison_df = pd.DataFrame({
+                            'Statistic': categories,
+                            'Current': current_stats,
+                            'Predicted': predicted_stats,
+                            'Change': [p - c for p, c in zip(predicted_stats, current_stats)]
+                        })
+                        st.write("Detailed Statistics Comparison:")
+                        st.dataframe(comparison_df)
                     else:
                         st.warning("Unable to generate predictions for the selected player.")
         except Exception as e:
