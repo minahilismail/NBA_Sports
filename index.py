@@ -28,6 +28,147 @@ st.markdown("""
 👩‍💻 **Minahil Ismail**  
 📚 Registration Number: **[21-NTU-CS-1339]**
 """)
+@st.cache_data
+def load_historical_data(years_range):
+    all_data = []
+    for year in years_range:
+        try:
+            url = f"https://www.basketball-reference.com/leagues/NBA_{year}_per_game.html"
+            df = pd.read_html(url, header=0)[0]
+            df = df[df['Age'] != 'Age'].fillna(0)
+            df['Year'] = year
+            all_data.append(df)
+        except Exception as e:
+            st.warning(f"Could not load data for year {year}: {e}")
+            continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    return pd.concat(all_data, ignore_index=True)
+
+class NBAPlayerPredictor:
+    def __init__(self):
+        self.historical_data = {}
+        self.scaler = StandardScaler()
+        self.feature_cols = ['Age', 'G', 'GS', 'MP', 'FG', 'FGA', 'FG%', '3P',
+                           '3PA', '3P%', 'FT%', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PTS']
+    
+    def load_historical_data(self, years_range):
+        self.historical_data = load_historical_data(years_range)
+        # Convert numeric columns
+        for col in self.feature_cols:
+            if col in self.historical_data.columns:
+                self.historical_data[col] = pd.to_numeric(self.historical_data[col], errors='coerce')
+    
+    def get_player_history(self, player_name):
+        player_data = self.historical_data[self.historical_data['Player'] == player_name]
+        return player_data.sort_values('Year')
+    
+    def prepare_prediction_features(self, player_history):
+        if len(player_history) < 2:
+            return None
+            
+        recent_seasons = player_history.sort_values('Year').tail(3)
+        
+        features = {}
+        for col in self.feature_cols:
+            if col in recent_seasons.columns:
+                features[f'{col}_last'] = recent_seasons[col].iloc[-1]
+                features[f'{col}_avg'] = recent_seasons[col].mean()
+                features[f'{col}_trend'] = recent_seasons[col].diff().mean()
+        
+        features['seasons_played'] = len(player_history)
+        features['age'] = recent_seasons['Age'].iloc[-1]
+        
+        return pd.DataFrame([features])
+    
+    def predict_future_performance(self, player_name):
+        player_history = self.get_player_history(player_name)
+        if len(player_history) < 2:
+            return None, "Insufficient historical data for prediction"
+            
+        X = self.prepare_prediction_features(player_history)
+        if X is None:
+            return None, "Could not prepare prediction features"
+            
+        predictions = {}
+        confidence_scores = {}
+        
+        for stat in ['PTS', 'AST', 'TRB']:
+            all_player_features = []
+            all_player_targets = []
+            
+            for player in self.historical_data['Player'].unique():
+                ph = self.get_player_history(player)
+                if len(ph) >= 3:
+                    features = self.prepare_prediction_features(ph.iloc[:-1])
+                    if features is not None:
+                        all_player_features.append(features)
+                        all_player_targets.append(ph[stat].iloc[-1])
+            
+            if all_player_features:
+                X_train = pd.concat(all_player_features, ignore_index=True)
+                y_train = np.array(all_player_targets)
+                
+                model = RandomForestRegressor(n_estimators=100, random_state=42)
+                model.fit(X_train, y_train)
+                
+                pred = model.predict(X)[0]
+                predictions[stat] = pred
+                confidence_scores[stat] = model.score(X_train, y_train)
+        
+        return {
+            'predictions': predictions,
+            'confidence_scores': confidence_scores,
+            'current_stats': {
+                stat: player_history[stat].iloc[-1] for stat in ['PTS', 'AST', 'TRB']
+            },
+            'historical_trend': {
+                stat: player_history[stat].tolist() for stat in ['PTS', 'AST', 'TRB']
+            }
+        }
+
+# AI/ML Features
+class NBAInsightsAI:
+    def __init__(self, df):
+        self.df = df
+        self.scaler = StandardScaler()
+        self.feature_cols = ['Age', 'G', 'GS', 'MP', 'FG', 'FGA', 'FG%', '3P',
+                           '3PA', '3P%', 'FT%', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PTS']
+        
+        self.scaler.fit(df[self.feature_cols])
+    def prepare_features(self, data):
+        return self.scaler.fit_transform(data[self.feature_cols])
+
+    def find_similar_players(self, player_name, n_neighbors=5):
+        X = self.prepare_features(self.df)
+        X = pd.DataFrame(X).reset_index(drop=True)
+        aligned_df = self.df.reset_index(drop=True)
+
+        # Check if the player exists
+        if player_name not in aligned_df['Player'].values:
+            raise ValueError(f"Player '{player_name}' not found in the dataset.")
+
+        # Fit the NearestNeighbors model
+        nbrs = NearestNeighbors(n_neighbors=n_neighbors+1, metric='euclidean')
+        nbrs.fit(X)
+
+        # Get the player's index in the aligned DataFrame
+        player_idx = aligned_df[aligned_df['Player'] == player_name].index[0]
+
+        # Find similar players
+        distances, indices = nbrs.kneighbors(X.iloc[player_idx].values.reshape(1, -1))
+
+        similar_players = aligned_df.iloc[indices[0][1:]]
+        similarity_scores = 1 / (1 + distances[0][1:])
+
+        return pd.DataFrame({
+            'Player': similar_players['Player'].values,
+            'Similarity Score': similarity_scores,
+            'Position': similar_players['Pos'].values
+        })
+
 
 # Load Data
 @st.cache_data
@@ -46,99 +187,79 @@ def load_data(year):
         st.error(f"Error loading data for year {year}: {e}")
         return pd.DataFrame()
 
-# AI/ML Features
-class NBAInsightsAI:
-    def __init__(self, df):
-        self.df = df
-        self.scaler = StandardScaler()
-        self.feature_cols = ['Age', 'G', 'GS', 'MP', 'FG', 'FGA', 'FG%', '3P',
-                           '3PA', '3P%', 'FT%', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PTS']
-        
-        self.scaler.fit(df[self.feature_cols])
-    def prepare_features(self, data):
-        return self.scaler.fit_transform(data[self.feature_cols])
+def add_ai_features_ui(df, selected_year):
+    st.header("🤖 AI-Powered Insights")
+    ai_tab1, ai_tab2 = st.tabs(["Player Similarity", "Performance Prediction"])
 
-    def find_similar_players(self, player_name, n_neighbors=5):
-        X = self.prepare_features(self.df)
-        nbrs = NearestNeighbors(n_neighbors=n_neighbors+1, metric='euclidean')
-        nbrs.fit(X)
-        
-        player_idx = self.df[self.df['Player'] == player_name].index[0]
-        distances, indices = nbrs.kneighbors(X[player_idx].reshape(1, -1))
-        
-        similar_players = self.df.iloc[indices[0][1:]]
-        similarity_scores = 1 / (1 + distances[0][1:])
-        
-        return pd.DataFrame({
-            'Player': similar_players['Player'],
-            'Similarity Score': similarity_scores,
-            'Position': similar_players['Pos']
-        })
-
-    def predict_future_performance(self, player_data):
-        X = self.scaler.transform(self.df[self.feature_cols])
-        predictions = {}
-
-        # Get current age
-        current_age = player_data['Age'].iloc[0]
-
-        # Scale the selected player's features
-        player_features = self.scaler.transform(player_data[self.feature_cols])
-
-        for stat in ['PTS', 'AST', 'TRB']:
-            y = self.df[stat]
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X, y)
-
-            # Update age for prediction
-            player_features_copy = player_features.copy()
-            player_features_copy[:, self.feature_cols.index('Age')] = current_age + 1  # Increment age
-
-            
-            pred = model.predict(player_features_copy)
-            predictions[stat] = float(pred[0])
-
-        return predictions
-
-
-# Main App
-def main():
-    # Sidebar controls
-    st.sidebar.header('User Input Features')
-    selected_year = st.sidebar.selectbox('Year', list(reversed(range(1950, 2025))))
-
-    # Load data
     try:
-        playerstats = load_data(selected_year)
+        nba_ai = NBAInsightsAI(df)
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error("Error initializing AI models. Please check the data or try again later.")
         return
 
-    # Team and position selection
-    sorted_unique_team = sorted(playerstats.Team.unique())
-    selected_team = st.sidebar.multiselect('Team', sorted_unique_team, sorted_unique_team[:4])
-    
-    unique_pos = ['C', 'PF', 'SF', 'PG', 'SG']
-    selected_pos = st.sidebar.multiselect('Position', unique_pos, unique_pos[:3])
+    with ai_tab1:
+        st.subheader("Find Similar Players")
+        selected_player = st.selectbox("Select a player:", df['Player'].unique())
+        if selected_player:
+            similar_players = nba_ai.find_similar_players(selected_player)
+            if not similar_players.empty:
+                fig = px.bar(similar_players,
+                             x='Player',
+                             y='Similarity Score',
+                             color='Position',
+                             title=f"Players Similar to {selected_player}")
+                st.plotly_chart(fig)
+                st.dataframe(similar_players)
 
-    # Filter data
-    df_selected_team = playerstats[(playerstats.Team.isin(selected_team)) & (playerstats.Pos.isin(selected_pos))]
+    with ai_tab2:
+        st.subheader("Performance Prediction")
+        pred_player = st.selectbox("Select player for prediction:", df['Player'].unique(), key='pred_player')
 
-    # Basic Stats Section
-    st.header('📊 Basic Player Stats')
-    tab1, tab2 = st.tabs(["Player Stats", "AI Features"])
+        predictor = NBAPlayerPredictor()
+        try:
+            predictor.load_historical_data(range(selected_year-3, selected_year+1))
+        except Exception as e:
+            st.error(f"Error loading historical data: {e}")
+            return
+        if pred_player:
+            results = predictor.predict_future_performance(pred_player)
+            if isinstance(results, tuple):
+                st.warning(results[1])
+            elif results:
+                # Create radar chart
+                categories = ['Points', 'Assists', 'Rebounds']
+                current_stats = [
+                    results['current_stats']['PTS'],
+                    results['current_stats']['AST'],
+                    results['current_stats']['TRB']
+                ]
+                predicted_stats = [
+                    results['predictions']['PTS'],
+                    results['predictions']['AST'],
+                    results['predictions']['TRB']
+                ]
 
-    with tab1:
-        st.dataframe(df_selected_team, use_container_width=True)
-        st.markdown(filedownload(df_selected_team), unsafe_allow_html=True)
-        
-        create_basic_visualizations(df_selected_team)
+                fig = go.Figure()
+                fig.add_trace(go.Scatterpolar(
+                    r=current_stats,
+                    theta=categories,
+                    fill='toself',
+                    name='Current Stats'
+                ))
+                fig.add_trace(go.Scatterpolar(
+                    r=predicted_stats,
+                    theta=categories,
+                    fill='toself',
+                    name='Predicted Stats'
+                ))
 
-    with tab2:
-        if not df_selected_team.empty:
-            add_ai_features_ui(df_selected_team)
-        else:
-            st.warning("Please select teams and positions to enable AI features.")
+                fig.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, max(max(current_stats), max(predicted_stats))])),
+                    showlegend=True,
+                    title=f"Performance Prediction for {pred_player}"
+                )
+                st.plotly_chart(fig)
+
 
 def create_basic_visualizations(df_selected_team):
     if not df_selected_team.empty:
@@ -253,96 +374,36 @@ def filedownload(df):
     href = f'<a href="data:file/csv;base64,{b64}" download="playerstats.csv">Download CSV File</a>'
     return href
 
-def add_ai_features_ui(df):
-    st.header("🤖 AI-Powered Insights")
 
-    ai_tab1, ai_tab2 = st.tabs(["Player Similarity", "Performance Prediction"])
+def main():
+    st.sidebar.header('User Input Features')
+    selected_year = st.sidebar.selectbox('Year', list(reversed(range(1980, 2025))))
 
-    # Initialize AI models
     try:
-        nba_ai = NBAInsightsAI(df)
-        
+        playerstats = load_data(selected_year)
     except Exception as e:
-        st.error("Error initializing AI models. Please check the data or try again later.")
+        st.error(f"Error loading data: {e}")
         return
 
-    with ai_tab1:
-        try:
-            st.subheader("Find Similar Players")
-            selected_player = st.selectbox("Select a player:", df['Player'].unique())
-            if selected_player:
-                similar_players = nba_ai.find_similar_players(selected_player)
-                if similar_players.empty:
-                    st.warning(f"No similar players found for {selected_player}.")
-                else:
-                    fig = px.bar(similar_players,
-                                 x='Player',
-                                 y='Similarity Score',
-                                 color='Position',
-                                 title=f"Players Similar to {selected_player}")
-                    st.plotly_chart(fig)
-                    st.dataframe(similar_players)
-        except Exception as e:
-            st.error("No similar players found.")
+    sorted_unique_team = sorted(playerstats.Team.unique())
+    selected_team = st.sidebar.multiselect('Team', sorted_unique_team, sorted_unique_team[:4])
+    
+    unique_pos = ['C', 'PF', 'SF', 'PG', 'SG']
+    selected_pos = st.sidebar.multiselect('Position', unique_pos, unique_pos[:3])
 
-    with ai_tab2:
-        try:
-            st.subheader("Performance Prediction")
-            pred_player = st.selectbox("Select player for prediction:", df['Player'].unique(), key='pred_player')
+    df_selected_team = playerstats[(playerstats.Team.isin(selected_team)) & (playerstats.Pos.isin(selected_pos))]
 
-            if pred_player:
-                player_data = df[df['Player'] == pred_player]
-                if player_data.empty:
-                    st.warning(f"No data found for {pred_player}.")
-                else:
-                    predictions = nba_ai.predict_future_performance(player_data)
-                    if predictions:
-                        categories = ['Points', 'Assists', 'Rebounds']
-                        current_stats = [
-                            float(player_data['PTS'].iloc[0]),
-                            float(player_data['AST'].iloc[0]),
-                            float(player_data['TRB'].iloc[0])
-                        ]
-                        predicted_stats = [predictions['PTS'], predictions['AST'], predictions['TRB']]
+    st.header('📊 Basic Player Stats')
+    tab1, tab2 = st.tabs(["Player Stats", "AI Features"])
 
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatterpolar(
-                            r=current_stats,
-                            theta=categories,
-                            fill='toself',
-                            name='Current Stats'
-                        ))
-                        fig.add_trace(go.Scatterpolar(
-                            r=predicted_stats,
-                            theta=categories,
-                            fill='toself',
-                            name='Predicted Stats (1 season ahead)'
-                        ))
+    with tab1:
+        st.dataframe(df_selected_team, use_container_width=True)
+        st.markdown(filedownload(df_selected_team), unsafe_allow_html=True)
+        create_basic_visualizations(df_selected_team)
 
-                        # Ensure all values are regular Python floats
-                        max_val = max(max(current_stats), max(predicted_stats))
-
-                        fig.update_layout(
-                            polar=dict(radialaxis=dict(visible=True, range=[0, float(max_val)])),
-                            showlegend=True,
-                            title=f"Performance Prediction for {pred_player}"
-                        )
-
-                        st.plotly_chart(fig)
-
-                        # Table showing stats
-                        comparison_df = pd.DataFrame({
-                            'Statistic': categories,
-                            'Current': current_stats,
-                            'Predicted': predicted_stats,
-                            'Change': [p - c for p, c in zip(predicted_stats, current_stats)]
-                        })
-                        st.write("Detailed Statistics Comparison:")
-                        st.dataframe(comparison_df)
-                    else:
-                        st.warning("Unable to generate predictions for the selected player.")
-        except Exception as e:
-            st.error("Error predicting player performance. Please try again.")
+    with tab2:
+            if not df_selected_team.empty:
+                add_ai_features_ui(df_selected_team, selected_year)
 
 if __name__ == "__main__":
     main()
